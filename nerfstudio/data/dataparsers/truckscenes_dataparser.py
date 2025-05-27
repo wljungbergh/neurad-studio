@@ -14,10 +14,9 @@
 # limitations under the License.
 """Data parser for TruckScenes dataset"""
 
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Set, Tuple, Type, Union
+from typing import Dict, List, Literal, Tuple, Type
 
 import numpy as np
 import pypcd4
@@ -30,10 +29,10 @@ from nerfstudio.cameras.lidars import Lidars, LidarType, transform_points
 from nerfstudio.data.dataparsers.ad_dataparser import (
     DUMMY_DISTANCE_VALUE,
     OPENCV_TO_NERFSTUDIO,
-    ADDataParser,
     ADDataParserConfig,
     SplitTypes,
 )
+from nerfstudio.data.dataparsers.nuscenes_dataparser import NuScenes
 from nerfstudio.data.utils.lidar_elevation_mappings import OUSTER_OS0_ELEVATION_MAPPING, PANDAR64_ELEVATION_MAPPING
 from nerfstudio.utils import poses as pose_utils
 
@@ -207,7 +206,7 @@ class TruckScenesDataParserConfig(ADDataParserConfig):
 
 
 @dataclass
-class TruckScenes(ADDataParser):
+class TruckScenes(NuScenes):
     """NuScenes DatasetParser"""
 
     config: TruckScenesDataParserConfig
@@ -373,31 +372,6 @@ class TruckScenes(ADDataParser):
         lidars.lidar_to_worlds = lidars.lidar_to_worlds.float()
         return point_clouds
 
-    def _get_actor_trajectories(self) -> List[Dict]:
-        trajs = defaultdict(list)
-        curr_sample = self.nusc.get("sample", self.scene["first_sample_token"])
-        while True:
-            for box_token in curr_sample["anns"]:
-                box = self.nusc.get_box(box_token)
-                pose = np.eye(4)
-                pose[:3, :3] = box.orientation.rotation_matrix
-                pose[:3, 3] = np.array(box.center)
-                pose = pose @ WLH_TO_LWH
-                instance_token = self.nusc.get("sample_annotation", box.token)["instance_token"]
-                trajs[instance_token].append(
-                    {
-                        "pose": pose,
-                        "wlh": np.array(box.wlh),
-                        "label": box.name,
-                        "time": curr_sample["timestamp"] / 1e6,
-                    }
-                )
-            if curr_sample["next"]:
-                curr_sample = self.nusc.get("sample", curr_sample["next"])
-            else:
-                break
-        return self._traj_dict_to_list(trajs)
-
     def _generate_dataparser_outputs(self, split="train"):
         self.nusc = TruckScenesDatabase(
             version=self.config.version,
@@ -405,69 +379,10 @@ class TruckScenes(ADDataParser):
             verbose=self.config.verbose,
         )
         self.scene = self.nusc.get("scene", self.nusc.field2token("scene", "name", str(self.config.sequence))[0])
-        out = super()._generate_dataparser_outputs(split)
+        out = super(NuScenes, self)._generate_dataparser_outputs(split)
         del self.nusc
         del self.scene
         return out
-
-    def _find_all_sample_data(self, sample_data_token: str):
-        """Finds all sample data from a given sample token."""
-        curr_token = sample_data_token
-        sd = self.nusc.get("sample_data", curr_token)
-        # Rewind to first sample data
-        while sd["prev"]:
-            curr_token = sd["prev"]
-            sd = self.nusc.get("sample_data", curr_token)
-        # Forward to last sample data
-        all_sample_data = [sd]
-        while sd["next"]:
-            curr_token = sd["next"]
-            sd = self.nusc.get("sample_data", curr_token)
-            all_sample_data.append(sd)
-        return all_sample_data
-
-    def _traj_dict_to_list(self, traj: dict) -> list:
-        """Convert a dictionary of lists with trajectories to a list of dictionaries with trajectories"""
-        allowed_classes: Set[str] = set(ALLOWED_RIGID_CLASSES)
-        if self.config.include_deformable_actors:
-            allowed_classes.update(ALLOWED_DEFORMABLE_CLASSES)
-        traj_out = []
-        for instance_token, traj_list in traj.items():
-            poses = torch.from_numpy(np.stack([t["pose"] for t in traj_list]).astype(np.float32))
-            times = torch.from_numpy(np.array([t["time"] for t in traj_list]))
-            dims = torch.from_numpy(np.array([t["wlh"] for t in traj_list]).astype(np.float32))
-            dims = dims.max(0).values  # take max dimensions (important for deformable objects)
-            dynamic = (poses[:, :2, 3].std(dim=0) > 0.50).any()
-            stationary = not dynamic  # TODO: maybe make this stricter
-            if stationary or not _is_label_allowed(traj_list[0]["label"], allowed_classes):
-                continue
-            traj_dict = {
-                "uuid": instance_token,
-                "label": traj_list[0]["label"],
-                "poses": poses,
-                "timestamps": times,
-                "dims": dims,
-                "stationary": stationary,
-                "symmetric": "human" not in traj_list[0]["label"],
-                "deformable": "human" in traj_list[0]["label"],
-            }
-            traj_out.append(traj_dict)
-        return traj_out
-
-    def _get_nuscenes_sample_indices(self, is_key_frame: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        train_mask = ~is_key_frame
-        eval_mask = is_key_frame
-        return train_mask.nonzero(as_tuple=True)[0], eval_mask.nonzero(as_tuple=True)[0]
-
-    def _get_train_eval_indices(self, sensors: Union[Cameras, Lidars]) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.config.train_eval_split_type == SplitTypes.LINSPACE:
-            return self._get_linspaced_indices(sensors.metadata["sensor_idxs"].squeeze(-1))
-        elif self.config.train_eval_split_type == SplitTypes.NUSCENES_SAMPLES:
-            is_key_frame = sensors.metadata["is_key_frame"]
-            del sensors.metadata["is_key_frame"]
-            return self._get_nuscenes_sample_indices(is_key_frame)
-        else:
-            raise ValueError(f"Unknown split type {self.config.train_eval_split_type}")
 
 
 def _rotation_translation_to_pose(r_quat, t_vec):
@@ -483,15 +398,6 @@ def _rotation_translation_to_pose(r_quat, t_vec):
 
     pose[:3, 3] = t_vec
     return pose
-
-
-def _is_label_allowed(label: str, allowed_classes: Set[str]) -> bool:
-    """Check if label is allowed, on all possible hierarchies."""
-    split_label = label.split(".")
-    for i in range(len(split_label)):
-        if ".".join(split_label[: i + 1]) in allowed_classes:
-            return True
-    return False
 
 
 if __name__ == "__main__":
