@@ -26,6 +26,7 @@ from nerfstudio.data.dataparsers.base_dataparser import DataParserConfig
 from nerfstudio.data.dataparsers.kittimot_dataparser import KittiMotDataParserConfig
 from nerfstudio.data.dataparsers.nuscenes_dataparser import NuScenesDataParserConfig
 from nerfstudio.data.dataparsers.pandaset_dataparser import PandaSetDataParserConfig
+from nerfstudio.data.dataparsers.truckscenes_dataparser import TruckScenesDataParserConfig
 from nerfstudio.data.dataparsers.zod_dataparser import ZodDataParserConfig
 from nerfstudio.plugins.registry_dataparser import discover_dataparsers
 from nerfstudio.utils.rich_utils import CONSOLE
@@ -33,6 +34,7 @@ from nerfstudio.utils.rich_utils import CONSOLE
 dataparsers = {
     "kittimot-data": KittiMotDataParserConfig(),
     "nuscenes-data": NuScenesDataParserConfig(),
+    "truckscenes-data": TruckScenesDataParserConfig(),
     "argoverse2-data": Argoverse2DataParserConfig(),
     "zod-data": ZodDataParserConfig(),
     "pandaset-data": PandaSetDataParserConfig(),
