@@ -260,7 +260,7 @@ class TruckScenes(ADDataParser):
 
         # To tensors
         intrinsics = torch.tensor(np.array(intrinsics), dtype=torch.float32)
-        poses = torch.tensor(np.array(poses), dtype=torch.float32)
+        poses = torch.tensor(np.array(poses), dtype=torch.float64)  # will be changed to float32 later
         cam2egos = torch.tensor(np.array(cam2egos), dtype=torch.float32)
         times = torch.tensor(times, dtype=torch.float64)
         idxs = torch.tensor(idxs).int().unsqueeze(-1)
@@ -339,7 +339,7 @@ class TruckScenes(ADDataParser):
                 [
                     xyz,
                     reflectance,  # add reflectance as last channel
-                    timestamp.astype(np.int32),  # add timestamp as last channel
+                    timestamp / 1e6,  # add timestamp as last channel
                 ],
                 axis=-1,
             )
@@ -379,8 +379,6 @@ class TruckScenes(ADDataParser):
 
             # add missing points to point clouds
             point_clouds = [torch.cat([pc, missing], dim=0) for pc, missing in zip(point_clouds, missing_points)]
-        # we do this here as we want to have the poses in float64 for the ego motion compensation removal 
-        lidars.lidar_to_worlds = lidars.lidar_to_worlds.float()
         return point_clouds
 
     def _generate_dataparser_outputs(self, split="train"):
@@ -443,7 +441,7 @@ class TruckScenes(ADDataParser):
             allowed_classes.update(ALLOWED_DEFORMABLE_CLASSES)
         traj_out = []
         for instance_token, traj_list in traj.items():
-            poses = torch.from_numpy(np.stack([t["pose"] for t in traj_list]).astype(np.float32))
+            poses = torch.from_numpy(np.stack([t["pose"] for t in traj_list]))
             times = torch.from_numpy(np.array([t["time"] for t in traj_list]))
             dims = torch.from_numpy(np.array([t["wlh"] for t in traj_list]).astype(np.float32))
             dims = dims.max(0).values  # take max dimensions (important for deformable objects)
