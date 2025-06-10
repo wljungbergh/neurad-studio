@@ -14,9 +14,10 @@
 # limitations under the License.
 """Data parser for TruckScenes dataset"""
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Tuple, Type
+from typing import Dict, List, Literal, Set, Tuple, Type
 
 import numpy as np
 import pypcd4
@@ -29,24 +30,25 @@ from nerfstudio.cameras.lidars import Lidars, LidarType, transform_points
 from nerfstudio.data.dataparsers.ad_dataparser import (
     DUMMY_DISTANCE_VALUE,
     OPENCV_TO_NERFSTUDIO,
+    ADDataParser,
     ADDataParserConfig,
     SplitTypes,
 )
-from nerfstudio.data.dataparsers.nuscenes_dataparser import NuScenes
 from nerfstudio.data.utils.lidar_elevation_mappings import OUSTER_OS0_ELEVATION_MAPPING, PANDAR64_ELEVATION_MAPPING
 from nerfstudio.utils import poses as pose_utils
 
-MAX_RELECTANCE_VALUE = 1.0
-LIDAR_FREQUENCY = 20.0  # Hz
-LIDAR_CHANNELS = 32  # number of vertical channels
 ALLOWED_RIGID_CLASSES = (
     "vehicle.car",
     "vehicle.bicycle",
     "vehicle.motorcycle",
     "vehicle.bus",
-    "vehicle.bus",
     "vehicle.truck",
+    "vehicle.train",
+    "vehicle.ego_trailer",
     "vehicle.trailer",
+    "vehicle.construction",
+    "vehicle.othervehicle.emergency.ambulance",
+    "vehicle.emergency.police",
     "movable_object.pushable_pullable",
 )
 ALLOWED_DEFORMABLE_CLASSES = ("human.pedestrian",)
@@ -59,6 +61,13 @@ TRACKING_TO_GT_CLASSNAME_MAPPING = {
     "bus": "vehicle.bus",
     "truck": "vehicle.truck",
     "trailer": "vehicle.truck",
+    "construction_vehicle": "vehicle.construction",
+    "emergency_vehicle": "vehicle.othervehicle.emergency.ambulance",
+    "police_vehicle": "vehicle.emergency.police",
+    "other_vehicle": "vehicle.othervehicle",
+    "ego_trailer": "vehicle.ego_trailer",
+    "train": "vehicle.train",
+    "pushable_pullable": "movable_object.pushable_pullable",
 }
 # Nuscenes defines actor coordinate system as x-forward, y-left, z-up
 # But we want to use x-right, y-forward, z-up
@@ -85,11 +94,10 @@ TRUCKSCENES_ELEVATION_MAPPING = {
 TRUCKSCENES_AZIMUTH_RESOLUTION = {
     "LEFT": 1 / 3.0,
     "RIGHT": 1 / 3.0,
-    "REAR": 1 / 3.0, #TODO: check these values 
-    "TOP_FRONT": 1 / 3.0,
-    "TOP_LEFT": 1 / 3.0,
-    "TOP_RIGHT": 1 / 3.0,
-
+    "REAR": 1 / 3.0,  # TODO: check these values
+    "TOP_FRONT": 1 / 3.0,  # TODO: check these values
+    "TOP_LEFT": 1 / 3.0,  # TODO: check these values
+    "TOP_RIGHT": 1 / 3.0,  # TODO: check these values
 }
 TRUCKSCENES_SKIP_ELEVATION_CHANNELS = {k: tuple() for k in TRUCKSCENES_ELEVATION_MAPPING.keys()}
 
@@ -155,17 +163,20 @@ class TruckScenesDataParserConfig(ADDataParserConfig):
     """Which cameras to use."""
     lidars: Tuple[
         Literal[
-            "LEFT",
-            "RIGHT",
-            "REAR",
-            "TOP_FRONT",
-            "TOP_LEFT",
-            "TOP_RIGHT",
+            "LEFT",  # pandar64
+            "RIGHT",  # pandar64
+            "REAR",  # ouster
+            "TOP_FRONT",  # ouster
+            "TOP_LEFT",  # ouster
+            "TOP_RIGHT",  # ouster
             "all",
             "none",
         ],
         ...,
-    ] = ("LEFT", "RIGHT",)
+    ] = (
+        "LEFT",
+        "RIGHT",
+    )
     radars: Tuple[
         Literal[
             "LEFT_FRONT",
@@ -206,7 +217,7 @@ class TruckScenesDataParserConfig(ADDataParserConfig):
 
 
 @dataclass
-class TruckScenes(NuScenes):
+class TruckScenes(ADDataParser):
     """NuScenes DatasetParser"""
 
     config: TruckScenesDataParserConfig
@@ -379,10 +390,79 @@ class TruckScenes(NuScenes):
             verbose=self.config.verbose,
         )
         self.scene = self.nusc.get("scene", self.nusc.field2token("scene", "name", str(self.config.sequence))[0])
-        out = super(NuScenes, self)._generate_dataparser_outputs(split)
+        out = super()._generate_dataparser_outputs(split)
         del self.nusc
         del self.scene
         return out
+
+    def _find_all_sample_data(self, sample_data_token: str):
+        """Finds all sample data from a given sample token."""
+        curr_token = sample_data_token
+        sd = self.nusc.get("sample_data", curr_token)
+        # Rewind to first sample data
+        while sd["prev"]:
+            curr_token = sd["prev"]
+            sd = self.nusc.get("sample_data", curr_token)
+        # Forward to last sample data
+        all_sample_data = [sd]
+        while sd["next"]:
+            curr_token = sd["next"]
+            sd = self.nusc.get("sample_data", curr_token)
+            all_sample_data.append(sd)
+        return all_sample_data
+
+    def _get_actor_trajectories(self) -> List[Dict]:
+        trajs = defaultdict(list)
+        curr_sample = self.nusc.get("sample", self.scene["first_sample_token"])
+        while True:
+            for box_token in curr_sample["anns"]:
+                box = self.nusc.get_box(box_token)
+                pose = np.eye(4)
+                pose[:3, :3] = box.orientation.rotation_matrix
+                pose[:3, 3] = np.array(box.center)
+                pose = pose @ WLH_TO_LWH
+                instance_token = self.nusc.get("sample_annotation", box.token)["instance_token"]
+                trajs[instance_token].append(
+                    {
+                        "pose": pose,
+                        "wlh": np.array(box.wlh),
+                        "label": box.name,
+                        "time": curr_sample["timestamp"] / 1e6,
+                    }
+                )
+            if curr_sample["next"]:
+                curr_sample = self.nusc.get("sample", curr_sample["next"])
+            else:
+                break
+        return self._traj_dict_to_list(trajs)
+
+    def _traj_dict_to_list(self, traj: dict) -> list:
+        """Convert a dictionary of lists with trajectories to a list of dictionaries with trajectories"""
+        allowed_classes: Set[str] = set(ALLOWED_RIGID_CLASSES)
+        if self.config.include_deformable_actors:
+            allowed_classes.update(ALLOWED_DEFORMABLE_CLASSES)
+        traj_out = []
+        for instance_token, traj_list in traj.items():
+            poses = torch.from_numpy(np.stack([t["pose"] for t in traj_list]).astype(np.float32))
+            times = torch.from_numpy(np.array([t["time"] for t in traj_list]))
+            dims = torch.from_numpy(np.array([t["wlh"] for t in traj_list]).astype(np.float32))
+            dims = dims.max(0).values  # take max dimensions (important for deformable objects)
+            dynamic = (poses[:, :2, 3].std(dim=0) > 0.50).any()
+            stationary = not dynamic  # TODO: maybe make this stricter
+            if stationary or not _is_label_allowed(traj_list[0]["label"], allowed_classes):
+                continue
+            traj_dict = {
+                "uuid": instance_token,
+                "label": traj_list[0]["label"],
+                "poses": poses,
+                "timestamps": times,
+                "dims": dims,
+                "stationary": stationary,
+                "symmetric": "human" not in traj_list[0]["label"],
+                "deformable": "human" in traj_list[0]["label"],
+            }
+            traj_out.append(traj_dict)
+        return traj_out
 
 
 def _rotation_translation_to_pose(r_quat, t_vec):
@@ -399,6 +479,14 @@ def _rotation_translation_to_pose(r_quat, t_vec):
     pose[:3, 3] = t_vec
     return pose
 
+def _is_label_allowed(label: str, allowed_classes: Set[str]) -> bool:
+    """Check if label is allowed, on all possible hierarchies."""
+    split_label = label.split(".")
+    for i in range(len(split_label)):
+        if ".".join(split_label[: i + 1]) in allowed_classes:
+            return True
+    return False
+
 
 if __name__ == "__main__":
     config = TruckScenesDataParserConfig()
@@ -411,8 +499,35 @@ if __name__ == "__main__":
 
     idx = 0
     all_elevations = set()
+    # from plotly import graph_objects as go
+
+    # fig = go.Figure()
+    # # plot the point cloud
+    # xyz = out.metadata["point_clouds"][50]
+    # fig.add_trace(
+    #     go.Scatter3d(
+    #         x=xyz[:, 0],
+    #         y=xyz[:, 1],
+    #         z=xyz[:, 2],
+    #         mode="markers",
+    #         marker=dict(size=1, color=xyz[:, 3], colorscale="Viridis", opacity=0.8),
+    #     )
+    # )
+    # fig.update_layout(
+    #     scene=dict(
+    #         xaxis_title="X",
+    #         yaxis_title="Y",
+    #         zaxis_title="Z",
+    #         aspectmode="data",
+    #     ),
+    #     title=f"Lidar {idx} Point Cloud",
+    # )
+    # fig.show()
+
     for pcs in out.metadata["point_clouds"]:
-        # lets see if we can find th 
+        # lets see if we can find th
+
+        # convert to torch tensor
         dist = torch.norm(pcs[:, :3], dim=-1)
         elevation = torch.arcsin(pcs[:, 2] / dist)
         elevation = torch.rad2deg(elevation)
