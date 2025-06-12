@@ -84,21 +84,22 @@ HORIZONTAL_BEAM_DIVERGENCE = 0.00333333333  # radians, given as 4 inches at 100 
 VERTICAL_BEAM_DIVERGENCE = 0.00166666666  # radians, given as 2 inches at 100 feet
 
 TRUCKSCENES_ELEVATION_MAPPING = {
-    "LEFT": PANDAR64_ELEVATION_MAPPING, # Field of View: 360° x 40° | Resolution: 64 vertical layers
+    "LEFT": PANDAR64_ELEVATION_MAPPING,  # Field of View: 360° x 40° | Resolution: 64 vertical layers
     "RIGHT": PANDAR64_ELEVATION_MAPPING,
-    "REAR": OUSTER_OS0_ELEVATION_MAPPING, # Field of View: 360° x 90° | Resolution: 64 vertical layers | Range: 35 m @10 %
-    "TOP_FRONT": OUSTER_OS0_ELEVATION_MAPPING, 
+    "REAR": OUSTER_OS0_ELEVATION_MAPPING,  # Field of View: 360° x 90° | Resolution: 64 vertical layers | Range: 35 m @10 %
+    "TOP_FRONT": OUSTER_OS0_ELEVATION_MAPPING,
     "TOP_LEFT": OUSTER_OS0_ELEVATION_MAPPING,
     "TOP_RIGHT": OUSTER_OS0_ELEVATION_MAPPING,
 }
 TRUCKSCENES_AZIMUTH_RESOLUTION = {
     "LEFT": 1 / 3.0,
     "RIGHT": 1 / 3.0,
-    "REAR": 1 / 3.0,  # TODO: check these values
-    "TOP_FRONT": 1 / 3.0,  # TODO: check these values
-    "TOP_LEFT": 1 / 3.0,  # TODO: check these values
-    "TOP_RIGHT": 1 / 3.0,  # TODO: check these values
+    "REAR": 1 / 3.0,
+    "TOP_FRONT": 1 / 3.0,
+    "TOP_LEFT": 1 / 3.0,
+    "TOP_RIGHT": 1 / 3.0,
 }
+
 TRUCKSCENES_SKIP_ELEVATION_CHANNELS = {k: tuple() for k in TRUCKSCENES_ELEVATION_MAPPING.keys()}
 
 
@@ -117,7 +118,7 @@ AVAILABLE_LIDARS = (
     "LEFT",
     "RIGHT",
     "REAR",
-) 
+)
 
 AVAILABLE_RADARS = (
     "LEFT_FRONT",
@@ -129,7 +130,6 @@ AVAILABLE_RADARS = (
 )
 
 CAMERA_TO_BOTTOM_RIGHT_CROP = {k: (0, 0) for k in AVAILABLE_CAMERAS}
-CAMERA_TO_BOTTOM_RIGHT_CROP["RIGHT_BACK"] = (0, 50) # usually catch some parts of the trailer.
 
 DEFAULT_IMAGE_HEIGHT = 943
 DEFAULT_IMAGE_WIDTH = 1980
@@ -250,12 +250,8 @@ class TruckScenes(ADDataParser):
                 intrinsics.append(calibrated_sensor_data["camera_intrinsic"])
                 times.append(sample_data["timestamp"] / 1e6)
                 idxs.append(cam_idx)
-                heights.append(
-                    DEFAULT_IMAGE_HEIGHT - CAMERA_TO_BOTTOM_RIGHT_CROP[camera[7:]][0]
-                )  # :4 to remove CAM_
-                widths.append(
-                    DEFAULT_IMAGE_WIDTH - CAMERA_TO_BOTTOM_RIGHT_CROP[camera[7:]][1]
-                )  # :4 to remove CAM_
+                heights.append(DEFAULT_IMAGE_HEIGHT - CAMERA_TO_BOTTOM_RIGHT_CROP[camera[7:]][0])  # :7 remove CAMERA_
+                widths.append(DEFAULT_IMAGE_WIDTH - CAMERA_TO_BOTTOM_RIGHT_CROP[camera[7:]][1])  # :7 remove CAMERA_
                 is_key_frame.append(sample_data["is_key_frame"])
 
         # To tensors
@@ -287,7 +283,7 @@ class TruckScenes(ADDataParser):
         is_key_frame = []
         if "all" in self.config.lidars:
             self.config.lidars = AVAILABLE_LIDARS
-        
+
         for lidar_idx, lidar in enumerate(["LIDAR_" + lidar for lidar in self.config.lidars]):
             for lidar_data in self._find_all_sample_data(first_sample["data"][lidar]):
                 calibrated_sensor_data = self.nusc.get("calibrated_sensor", lidar_data["calibrated_sensor_token"])
